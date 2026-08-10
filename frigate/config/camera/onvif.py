@@ -1,13 +1,19 @@
 from enum import Enum
 from typing import Optional, Union
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from ..base import FrigateBaseModel
 from ..env import EnvString
 from .objects import DEFAULT_TRACKED_OBJECTS
 
-__all__ = ["OnvifConfig", "PtzAutotrackConfig", "ZoomingModeEnum"]
+__all__ = [
+    "OnvifConfig",
+    "PtzAutotrackConfig",
+    "PtzPatrolConfig",
+    "PtzPatrolStepConfig",
+    "ZoomingModeEnum",
+]
 
 
 class ZoomingModeEnum(str, Enum):
@@ -71,6 +77,31 @@ class PtzAutotrackConfig(FrigateBaseModel):
         return weights
 
 
+class PtzPatrolStepConfig(FrigateBaseModel):
+    preset: str = Field(min_length=1, title="ONVIF preset name.")
+    dwell: int = Field(
+        default=10,
+        ge=1,
+        le=3600,
+        title="Seconds to remain at this preset before advancing.",
+    )
+
+
+class PtzPatrolConfig(FrigateBaseModel):
+    enabled: bool = Field(default=False, title="Start the PTZ patrol automatically.")
+    steps: list[PtzPatrolStepConfig] = Field(
+        default_factory=list,
+        max_length=64,
+        title="Ordered ONVIF presets and dwell times for the patrol.",
+    )
+
+    @model_validator(mode="after")
+    def validate_enabled_patrol(self):
+        if self.enabled and len(self.steps) < 2:
+            raise ValueError("an enabled patrol requires at least two steps")
+        return self
+
+
 class OnvifConfig(FrigateBaseModel):
     host: EnvString = Field(default="", title="Onvif Host")
     port: int = Field(default=8000, title="Onvif Port")
@@ -80,6 +111,10 @@ class OnvifConfig(FrigateBaseModel):
     autotracking: PtzAutotrackConfig = Field(
         default_factory=PtzAutotrackConfig,
         title="PTZ auto tracking config.",
+    )
+    patrol: PtzPatrolConfig = Field(
+        default_factory=PtzPatrolConfig,
+        title="PTZ preset patrol configuration.",
     )
     ignore_time_mismatch: bool = Field(
         default=False,

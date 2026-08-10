@@ -12,6 +12,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import useKeyboardListener from "@/hooks/use-keyboard-listener";
+import { useIsAdmin } from "@/hooks/use-is-admin";
 import { CameraPtzInfo } from "@/types/ptz";
 import React, { useCallback } from "react";
 import { isDesktop, isMobile } from "react-device-detect";
@@ -34,6 +35,7 @@ import { cn } from "@/lib/utils";
 
 import { useTranslation } from "react-i18next";
 import TooltipButton from "@/views/button/TooltipButton";
+import PtzPatrolDialog from "./PtzPatrolDialog";
 
 export default function PtzControlPanel({
   className,
@@ -49,7 +51,8 @@ export default function PtzControlPanel({
   setClickOverlay: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const { t } = useTranslation(["views/live"]);
-  const { data: ptz } = useSWR<CameraPtzInfo>(
+  const isAdmin = useIsAdmin();
+  const { data: ptz, mutate: refreshPtz } = useSWR<CameraPtzInfo>(
     enabled ? `${camera}/ptz/info` : null,
   );
 
@@ -288,6 +291,9 @@ export default function PtzControlPanel({
             </p>
           </TooltipContent>
         </Tooltip>
+      )}
+      {isAdmin && ptz?.features?.includes("pt") && (
+        <PtzPatrolDialog camera={camera} ptz={ptz} refresh={refreshPtz} />
       )}
       {(ptz?.presets?.length ?? 0) > 0 && (
         <DropdownMenu modal={!isDesktop}>

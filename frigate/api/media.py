@@ -26,6 +26,7 @@ from frigate.api.auth import (
     allow_any_authenticated,
     get_allowed_cameras_for_filter,
     require_camera_access,
+    require_role,
 )
 from frigate.api.defs.query.media_query_parameters import (
     Extension,
@@ -35,6 +36,7 @@ from frigate.api.defs.query.media_query_parameters import (
     MediaRecordingsAvailabilityQueryParams,
     MediaRecordingsSummaryQueryParams,
 )
+from frigate.api.defs.request.ptz_body import PtzPatrolBody, PtzPresetBody
 from frigate.api.defs.tags import Tags
 from frigate.camera.state import CameraState
 from frigate.config import FrigateConfig
@@ -48,6 +50,8 @@ from frigate.const import (
 )
 from frigate.models import Event, Previews, Recordings, Regions, ReviewSegment
 from frigate.track.object_processing import TrackedObjectProcessor
+from frigate.util.builtin import update_yaml_file_bulk
+from frigate.util.config import find_config_file
 from frigate.util.file import get_event_thumbnail_bytes
 from frigate.util.image import get_image_from_recording
 from frigate.util.media import get_keyframe_before
@@ -142,6 +146,108 @@ async def camera_ptz_info(request: Request, camera_name: str):
         return JSONResponse(
             content={"success": False, "message": "Camera not found"},
             status_code=404,
+        )
+
+
+async def _run_onvif(request: Request, coroutine):
+    future = asyncio.run_coroutine_threadsafe(coroutine, request.app.onvif.loop)
+    return await asyncio.wrap_future(future)
+
+
+@router.post(
+    "/{camera_name}/ptz/preset", dependencies=[Depends(require_role(["admin"]))]
+)
+async def camera_ptz_preset_create(
+    request: Request, camera_name: str, body: PtzPresetBody
+):
+    if camera_name not in request.app.frigate_config.cameras:
+        return JSONResponse(
+            content={"success": False, "message": "Camera not found"},
+            status_code=404,
+        )
+    try:
+        return await _run_onvif(
+            request, request.app.onvif.set_preset(camera_name, body.name)
+        )
+    except (RuntimeError, ValueError) as e:
+        return JSONResponse(
+            content={"success": False, "message": str(e)}, status_code=400
+        )
+
+
+@router.delete(
+    "/{camera_name}/ptz/preset/{preset_name}",
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def camera_ptz_preset_delete(
+    request: Request, camera_name: str, preset_name: str
+):
+    if camera_name not in request.app.frigate_config.cameras:
+        return JSONResponse(
+            content={"success": False, "message": "Camera not found"},
+            status_code=404,
+        )
+    try:
+        return await _run_onvif(
+            request,
+            request.app.onvif.remove_preset(camera_name, unquote(preset_name)),
+        )
+    except (RuntimeError, ValueError) as e:
+        return JSONResponse(
+            content={"success": False, "message": str(e)}, status_code=400
+        )
+
+
+@router.put(
+    "/{camera_name}/ptz/patrol", dependencies=[Depends(require_role(["admin"]))]
+)
+async def camera_ptz_patrol_configure(
+    request: Request, camera_name: str, body: PtzPatrolBody
+):
+    if camera_name not in request.app.frigate_config.cameras:
+        return JSONResponse(
+            content={"success": False, "message": "Camera not found"},
+            status_code=404,
+        )
+    try:
+        info = await _run_onvif(
+            request,
+            request.app.onvif.configure_patrol(camera_name, body),
+        )
+        update_yaml_file_bulk(
+            find_config_file(),
+            {f"cameras.{camera_name}.onvif.patrol": body.model_dump()},
+        )
+        return info
+    except (RuntimeError, ValueError) as e:
+        return JSONResponse(
+            content={"success": False, "message": str(e)}, status_code=400
+        )
+
+
+@router.post(
+    "/{camera_name}/ptz/patrol/start",
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def camera_ptz_patrol_start(request: Request, camera_name: str):
+    try:
+        return await _run_onvif(request, request.app.onvif.start_patrol(camera_name))
+    except (KeyError, RuntimeError, ValueError) as e:
+        return JSONResponse(
+            content={"success": False, "message": str(e)}, status_code=400
+        )
+
+
+@router.post(
+    "/{camera_name}/ptz/patrol/stop",
+    dependencies=[Depends(require_role(["admin"]))],
+)
+async def camera_ptz_patrol_stop(request: Request, camera_name: str):
+    try:
+        return await _run_onvif(request, request.app.onvif.stop_patrol(camera_name))
+    except (KeyError, RuntimeError, ValueError) as e:
+        return JSONResponse(
+            content={"success": False, "message": str(e)}, status_code=400
         )
 
 

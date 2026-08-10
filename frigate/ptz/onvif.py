@@ -1,6 +1,7 @@
 """Configure and control camera via onvif."""
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -14,7 +15,7 @@ from onvif import ONVIFCamera, ONVIFError, ONVIFService
 from zeep.exceptions import Fault, TransportError
 
 from frigate.camera import PTZMetrics
-from frigate.config import FrigateConfig, ZoomingModeEnum
+from frigate.config import FrigateConfig, PtzPatrolConfig, ZoomingModeEnum
 from frigate.util.builtin import find_by_key
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,8 @@ class OnvifController:
         self.ptz_metrics = ptz_metrics
 
         self.status_locks: dict[str, asyncio.Lock] = {}
+        self.patrol_tasks: dict[str, asyncio.Task] = {}
+        self.patrol_state: dict[str, dict[str, Any]] = {}
 
         # Create a dedicated event loop and run it in a separate thread
         self.loop = asyncio.new_event_loop()
@@ -64,6 +67,11 @@ class OnvifController:
             if cam.onvif.host:
                 self.camera_configs[cam_name] = cam
                 self.status_locks[cam_name] = asyncio.Lock()
+                self.patrol_state[cam_name] = {
+                    "running": False,
+                    "current_preset": None,
+                    "last_error": None,
+                }
 
         asyncio.run_coroutine_threadsafe(self._init_cameras(), self.loop)
 
@@ -78,7 +86,11 @@ class OnvifController:
     async def _init_cameras(self) -> None:
         """Initialize all configured cameras."""
         for cam_name in self.camera_configs:
-            await self._init_single_camera(cam_name)
+            if not await self._init_single_camera(cam_name):
+                continue
+            if self.config.cameras[cam_name].onvif.patrol.enabled:
+                if await self._init_onvif(cam_name):
+                    await self._start_patrol(cam_name)
 
     async def _init_single_camera(self, cam_name: str) -> bool:
         """Initialize a single camera by name.
@@ -431,6 +443,152 @@ class OnvifController:
         self.cams[camera_name]["init"] = True
         return True
 
+    async def _ensure_initialized(self, camera_name: str) -> None:
+        if camera_name not in self.cams:
+            if not await self._init_single_camera(camera_name):
+                raise RuntimeError(f"unable to initialize ONVIF camera {camera_name}")
+        if not self.cams[camera_name]["init"] and not await self._init_onvif(
+            camera_name
+        ):
+            raise RuntimeError(f"unable to initialize ONVIF services for {camera_name}")
+
+    async def _refresh_presets(self, camera_name: str) -> None:
+        move_request = self.cams[camera_name]["move_request"]
+        presets = await self.cams[camera_name]["ptz"].GetPresets(
+            {"ProfileToken": move_request.ProfileToken}
+        )
+        refreshed = {}
+        for preset in presets:
+            preset_name = getattr(preset, "Name") or f"preset {preset['token']}"
+            if isinstance(preset_name, bytes):
+                preset_name = preset_name.decode("utf-8")
+            refreshed[preset_name.lower()] = preset["token"]
+        self.cams[camera_name]["presets"] = refreshed
+
+    async def set_preset(self, camera_name: str, preset_name: str) -> dict[str, Any]:
+        """Save the camera's current position as an ONVIF preset."""
+        await self._ensure_initialized(camera_name)
+        name = preset_name.strip()
+        if not name:
+            raise ValueError("preset name cannot be empty")
+        request = {
+            "ProfileToken": self.cams[camera_name]["move_request"].ProfileToken,
+            "PresetName": name,
+        }
+        existing_token = self.cams[camera_name]["presets"].get(name.lower())
+        if existing_token is not None:
+            request["PresetToken"] = existing_token
+        await self.cams[camera_name]["ptz"].SetPreset(request)
+        await self._refresh_presets(camera_name)
+        return self._camera_info(camera_name)
+
+    async def remove_preset(self, camera_name: str, preset_name: str) -> dict[str, Any]:
+        """Delete an ONVIF preset unless it is used by the configured patrol."""
+        await self._ensure_initialized(camera_name)
+        name = preset_name.lower()
+        if any(
+            step.preset.lower() == name
+            for step in self.config.cameras[camera_name].onvif.patrol.steps
+        ):
+            raise ValueError("preset is used by the configured patrol")
+        token = self.cams[camera_name]["presets"].get(name)
+        if token is None:
+            raise ValueError(f"unknown preset: {preset_name}")
+        await self.cams[camera_name]["ptz"].RemovePreset(
+            {
+                "ProfileToken": self.cams[camera_name]["move_request"].ProfileToken,
+                "PresetToken": token,
+            }
+        )
+        await self._refresh_presets(camera_name)
+        return self._camera_info(camera_name)
+
+    async def configure_patrol(
+        self, camera_name: str, patrol: PtzPatrolConfig
+    ) -> dict[str, Any]:
+        """Apply a validated patrol configuration without restarting Frigate."""
+        await self._ensure_initialized(camera_name)
+        missing = sorted(
+            {
+                step.preset
+                for step in patrol.steps
+                if step.preset.lower() not in self.cams[camera_name]["presets"]
+            }
+        )
+        if missing:
+            raise ValueError(f"unknown patrol presets: {', '.join(missing)}")
+        await self._stop_patrol(camera_name)
+        self.config.cameras[camera_name].onvif.patrol = patrol
+        if patrol.enabled:
+            await self._start_patrol(camera_name)
+        return self._camera_info(camera_name)
+
+    async def _start_patrol(self, camera_name: str) -> None:
+        patrol = self.config.cameras[camera_name].onvif.patrol
+        if len(patrol.steps) < 2:
+            raise ValueError("a patrol requires at least two steps")
+        if (
+            camera_name in self.patrol_tasks
+            and not self.patrol_tasks[camera_name].done()
+        ):
+            return
+        state = self.patrol_state[camera_name]
+        state.update({"running": True, "current_preset": None, "last_error": None})
+        self.patrol_tasks[camera_name] = self.loop.create_task(
+            self._patrol_loop(camera_name)
+        )
+
+    async def start_patrol(self, camera_name: str) -> dict[str, Any]:
+        await self._ensure_initialized(camera_name)
+        await self._start_patrol(camera_name)
+        return self._camera_info(camera_name)
+
+    async def _stop_patrol(self, camera_name: str) -> None:
+        task = self.patrol_tasks.pop(camera_name, None)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if camera_name in self.patrol_state:
+            self.patrol_state[camera_name]["running"] = False
+            self.patrol_state[camera_name]["current_preset"] = None
+
+    async def stop_patrol(self, camera_name: str) -> dict[str, Any]:
+        await self._stop_patrol(camera_name)
+        return self._camera_info(camera_name)
+
+    async def _patrol_loop(self, camera_name: str) -> None:
+        try:
+            while True:
+                for step in self.config.cameras[camera_name].onvif.patrol.steps:
+                    self.patrol_state[camera_name]["current_preset"] = step.preset
+                    await self._move_to_preset(camera_name, step.preset)
+                    await asyncio.sleep(step.dwell)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"PTZ patrol failed for {camera_name}: {e}")
+            self.patrol_state[camera_name]["last_error"] = str(e)
+        finally:
+            self.patrol_state[camera_name]["running"] = False
+            self.patrol_state[camera_name]["current_preset"] = None
+
+    def _camera_info(self, camera_name: str) -> dict[str, Any]:
+        patrol = self.config.cameras[camera_name].onvif.patrol
+        state = self.patrol_state.get(camera_name, {})
+        return {
+            "name": camera_name,
+            "features": self.cams[camera_name]["features"],
+            "presets": list(self.cams[camera_name]["presets"].keys()),
+            "patrol": {
+                "enabled": patrol.enabled,
+                "steps": [step.model_dump() for step in patrol.steps],
+                "running": state.get("running", False),
+                "current_preset": state.get("current_preset"),
+                "last_error": state.get("last_error"),
+            },
+        }
+
     async def _stop(self, camera_name: str) -> None:
         move_request = self.cams[camera_name]["move_request"]
         await self.cams[camera_name]["ptz"].Stop(
@@ -708,6 +866,9 @@ class OnvifController:
             if not await self._init_onvif(camera_name):
                 return
 
+        if command != OnvifCommandEnum.init:
+            await self._stop_patrol(camera_name)
+
         try:
             if command == OnvifCommandEnum.init:
                 # already init
@@ -769,11 +930,7 @@ class OnvifController:
             return {}
 
         if camera_name in self.cams.keys() and self.cams[camera_name]["init"]:
-            return {
-                "name": camera_name,
-                "features": self.cams[camera_name]["features"],
-                "presets": list(self.cams[camera_name]["presets"].keys()),
-            }
+            return self._camera_info(camera_name)
 
         if camera_name not in self.cams.keys() and camera_name in self.config.cameras:
             success = await self._init_single_camera(camera_name)
@@ -798,11 +955,9 @@ class OnvifController:
                 if await self._init_onvif(camera_name):
                     if camera_name in self.failed_cams:
                         del self.failed_cams[camera_name]
-                    return {
-                        "name": camera_name,
-                        "features": self.cams[camera_name]["features"],
-                        "presets": list(self.cams[camera_name]["presets"].keys()),
-                    }
+                    if self.config.cameras[camera_name].onvif.patrol.enabled:
+                        await self._start_patrol(camera_name)
+                    return self._camera_info(camera_name)
                 else:
                     logger.warning(f"ONVIF initialization failed for {camera_name}")
             except Exception as e:

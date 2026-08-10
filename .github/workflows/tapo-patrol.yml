@@ -1,0 +1,83 @@
+name: Tapo patrol fork
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/tapo-patrol
+      - tapo-patrol-v0.17
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: tapo-patrol-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5.4.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20.x"
+      - name: Check Python formatting and lint
+        run: |
+          python3 -m pip install ruff==0.11.13
+          ruff format --check frigate migrations docker
+          ruff check frigate migrations docker
+      - name: Build and lint web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+  build_test_push:
+    runs-on: ubuntu-22.04
+    needs: checks
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image
+        name: Resolve image names
+        shell: bash
+        run: |
+          echo "repository=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Build AMD64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/main/Dockerfile
+          load: true
+          platforms: linux/amd64
+          target: frigate
+          tags: |
+            ${{ steps.image.outputs.repository }}:0.17.2-tapo-patrol-${{ steps.image.outputs.sha }}
+            ${{ steps.image.outputs.repository }}:0.17.2-tapo-patrol
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run patrol unit tests in image
+        run: >-
+          docker run --rm --entrypoint python3
+          ${{ steps.image.outputs.repository }}:0.17.2-tapo-patrol-${{ steps.image.outputs.sha }}
+          -u -m unittest frigate.test.test_ptz_patrol
+      - name: Push immutable and deployment tags
+        run: |
+          docker push "${{ steps.image.outputs.repository }}:0.17.2-tapo-patrol-${{ steps.image.outputs.sha }}"
+          docker push "${{ steps.image.outputs.repository }}:0.17.2-tapo-patrol"
