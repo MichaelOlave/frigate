@@ -29,20 +29,19 @@ An administrator can open a camera's PTZ controls and select the route button to
 Manual PTZ movement pauses a running patrol. Runtime start and stop do not change whether
 the patrol is enabled at startup.
 
-The UI persists the following schema in Frigate's normal `config.yml`:
+The UI persists the following schema in `/config/ptz_patrol.yml`:
 
 ```yaml
 cameras:
   camera_name:
-    onvif:
-      patrol:
-        enabled: true
-        steps:
-          - preset: left-window
-            dwell: 10
-          - preset: back-door
-            dwell: 15
+    enabled: true
+    steps:
+      - preset: left-window
+        dwell: 10
+      - preset: back-door
+        dwell: 15
 ```
 
 At least two steps are required when `enabled` is true. Presets are stored by the camera;
-the ordered route and dwell times are stored by Frigate.
+the ordered route and dwell times are stored by Frigate. Keeping this state in its own file
+lets deployment tooling replace `config.yml` without erasing routes created in the UI.

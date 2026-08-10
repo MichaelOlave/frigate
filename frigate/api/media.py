@@ -49,9 +49,8 @@ from frigate.const import (
     RECORD_DIR,
 )
 from frigate.models import Event, Previews, Recordings, Regions, ReviewSegment
+from frigate.ptz.patrol import save_patrol_config
 from frigate.track.object_processing import TrackedObjectProcessor
-from frigate.util.builtin import update_yaml_file_bulk
-from frigate.util.config import find_config_file
 from frigate.util.file import get_event_thumbnail_bytes
 from frigate.util.image import get_image_from_recording
 from frigate.util.media import get_keyframe_before
@@ -214,10 +213,7 @@ async def camera_ptz_patrol_configure(
             request,
             request.app.onvif.configure_patrol(camera_name, body),
         )
-        update_yaml_file_bulk(
-            find_config_file(),
-            {f"cameras.{camera_name}.onvif.patrol": body.model_dump()},
-        )
+        save_patrol_config(camera_name, body)
         return info
     except (RuntimeError, ValueError) as e:
         return JSONResponse(

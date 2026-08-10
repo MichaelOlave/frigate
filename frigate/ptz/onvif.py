@@ -16,6 +16,7 @@ from zeep.exceptions import Fault, TransportError
 
 from frigate.camera import PTZMetrics
 from frigate.config import FrigateConfig, PtzPatrolConfig, ZoomingModeEnum
+from frigate.ptz.patrol import load_patrol_configs
 from frigate.util.builtin import find_by_key
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,10 @@ class OnvifController:
         self.reset_timeout = 900  # 15 minutes
         self.config = config
         self.ptz_metrics = ptz_metrics
+
+        for camera_name, patrol in load_patrol_configs().items():
+            if camera_name in self.config.cameras:
+                self.config.cameras[camera_name].onvif.patrol = patrol
 
         self.status_locks: dict[str, asyncio.Lock] = {}
         self.patrol_tasks: dict[str, asyncio.Task] = {}
