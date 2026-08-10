@@ -48,7 +48,7 @@ class TestPtzPatrolStore(TestCase):
 
 
 class TestOnvifPatrolController(IsolatedAsyncioTestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
         self.controller = OnvifController.__new__(OnvifController)
         self.controller.loop = asyncio.get_running_loop()
         self.controller.patrol_tasks = {}
