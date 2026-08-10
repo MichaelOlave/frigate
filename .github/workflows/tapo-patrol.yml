@@ -59,6 +59,8 @@ jobs:
         run: |
           echo "repository=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
           echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Generate Frigate version files
+        run: make version
       - name: Build AMD64 image
         uses: docker/build-push-action@v6
         with:
