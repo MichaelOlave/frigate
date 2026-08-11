@@ -12,8 +12,10 @@ from frigate.ptz.onvif import OnvifController
 from frigate.ptz.patrol import load_patrol_configs, save_patrol_config
 
 
-def patrol_config(enabled=False, steps=None):
-    return PtzPatrolConfig(enabled=enabled, steps=steps or [])
+def patrol_config(enabled=False, object_tracking=False, steps=None):
+    return PtzPatrolConfig(
+        enabled=enabled, object_tracking=object_tracking, steps=steps or []
+    )
 
 
 class TestPtzPatrolConfig(IsolatedAsyncioTestCase):
@@ -56,6 +58,7 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
         self.controller.patrol_state = {
             "front": {
                 "running": False,
+                "paused_for_tracking": False,
                 "current_preset": None,
                 "last_error": None,
             }
@@ -71,9 +74,19 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
         }
         self.controller.config = SimpleNamespace(
             cameras={
-                "front": SimpleNamespace(onvif=SimpleNamespace(patrol=patrol_config()))
+                "front": SimpleNamespace(
+                    onvif=SimpleNamespace(
+                        patrol=patrol_config(),
+                        autotracking=SimpleNamespace(
+                            enabled=False, enabled_in_config=True
+                        ),
+                    )
+                )
             }
         )
+        self.controller.ptz_metrics = {
+            "front": SimpleNamespace(autotracker_enabled=SimpleNamespace(value=False))
+        }
         self.controller._ensure_initialized = AsyncMock()
 
     async def test_configure_rejects_unknown_presets(self):
@@ -119,6 +132,54 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
 
         self.controller._move_to_preset.assert_awaited_once_with("front", "door")
         self.assertFalse(self.controller.patrol_state["front"]["running"])
+
+    async def test_tracking_pause_resumes_running_patrol(self):
+        self.controller.config.cameras["front"].onvif.patrol = patrol_config(
+            enabled=True,
+            steps=[
+                PtzPatrolStepConfig(preset="door", dwell=1),
+                PtzPatrolStepConfig(preset="driveway", dwell=1),
+            ],
+        )
+        self.controller._move_to_preset = AsyncMock()
+
+        await self.controller._start_patrol("front")
+        await asyncio.sleep(0)
+        await self.controller.pause_patrol_for_tracking("front")
+
+        self.assertFalse(self.controller.patrol_state["front"]["running"])
+        self.assertTrue(self.controller.patrol_state["front"]["paused_for_tracking"])
+
+        resumed = await self.controller.resume_patrol_after_tracking("front")
+        await asyncio.sleep(0)
+        await self.controller._stop_patrol("front")
+
+        self.assertTrue(resumed)
+        self.assertEqual(self.controller._move_to_preset.await_count, 2)
+
+    async def test_manual_stop_clears_tracking_resume_intent(self):
+        self.controller.patrol_state["front"]["paused_for_tracking"] = True
+
+        await self.controller._stop_patrol("front")
+
+        self.assertFalse(self.controller.patrol_state["front"]["paused_for_tracking"])
+        self.assertFalse(await self.controller.resume_patrol_after_tracking("front"))
+
+    async def test_configure_object_tracking_updates_runtime_toggle(self):
+        config = patrol_config(
+            object_tracking=True,
+            steps=[
+                PtzPatrolStepConfig(preset="door", dwell=5),
+                PtzPatrolStepConfig(preset="driveway", dwell=5),
+            ],
+        )
+
+        await self.controller.configure_patrol("front", config)
+
+        self.assertTrue(
+            self.controller.config.cameras["front"].onvif.autotracking.enabled
+        )
+        self.assertTrue(self.controller.ptz_metrics["front"].autotracker_enabled.value)
 
     async def test_remove_rejects_preset_used_by_patrol(self):
         self.controller.config.cameras["front"].onvif.patrol = patrol_config(

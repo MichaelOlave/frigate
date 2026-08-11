@@ -5,6 +5,7 @@ type PtzFeature =
   | "zoom-r"
   | "zoom-a"
   | "pt-r-fov"
+  | "pt-r-generic"
   | "focus";
 
 export type CameraPtzInfo = {
@@ -13,7 +14,9 @@ export type CameraPtzInfo = {
   presets: string[];
   patrol: {
     enabled: boolean;
+    object_tracking: boolean;
     running: boolean;
+    paused_for_tracking: boolean;
     current_preset: string | null;
     last_error: string | null;
     steps: PtzPatrolStep[];

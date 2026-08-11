@@ -56,6 +56,12 @@ class OnvifController:
         for camera_name, patrol in load_patrol_configs().items():
             if camera_name in self.config.cameras:
                 self.config.cameras[camera_name].onvif.patrol = patrol
+                autotracking = self.config.cameras[camera_name].onvif.autotracking
+                if autotracking.enabled_in_config:
+                    autotracking.enabled = patrol.object_tracking
+                    self.ptz_metrics[
+                        camera_name
+                    ].autotracker_enabled.value = patrol.object_tracking
 
         self.status_locks: dict[str, asyncio.Lock] = {}
         self.patrol_tasks: dict[str, asyncio.Task] = {}
@@ -75,6 +81,7 @@ class OnvifController:
                 self.status_locks[cam_name] = asyncio.Lock()
                 self.patrol_state[cam_name] = {
                     "running": False,
+                    "paused_for_tracking": False,
                     "current_preset": None,
                     "last_error": None,
                 }
@@ -237,10 +244,7 @@ class OnvifController:
         self.cams[camera_name]["move_request"] = move_request
 
         # extra setup for autotracking cameras
-        if (
-            self.config.cameras[camera_name].onvif.autotracking.enabled_in_config
-            and self.config.cameras[camera_name].onvif.autotracking.enabled
-        ):
+        if self.config.cameras[camera_name].onvif.autotracking.enabled_in_config:
             request = ptz.create_type("GetConfigurationOptions")
             request.ConfigurationToken = profile.PTZConfiguration.token
             ptz_config = await ptz.GetConfigurationOptions(request)
@@ -261,6 +265,25 @@ class OnvifController:
                 ),
                 None,
             )
+            generic_space_id = next(
+                (
+                    i
+                    for i, space in enumerate(
+                        ptz_config.Spaces.RelativePanTiltTranslationSpace
+                    )
+                    if "TranslationGenericSpace" in space["URI"]
+                ),
+                None,
+            )
+            use_generic_relative = (
+                fov_space_id is None
+                and self.config.cameras[camera_name].onvif.autotracking.generic_relative
+                and generic_space_id is not None
+            )
+            relative_space_id = (
+                generic_space_id if use_generic_relative else fov_space_id
+            )
+            self.cams[camera_name]["generic_relative"] = use_generic_relative
 
             # status request for autotracking and filling ptz-parameters
             status_request = ptz.create_type("GetStatus")
@@ -294,11 +317,11 @@ class OnvifController:
             move_request = ptz.create_type("RelativeMove")
             move_request.ProfileToken = profile.token
             logger.debug(f"{camera_name}: Relative move request: {move_request}")
-            if move_request.Translation is None and fov_space_id is not None:
+            if move_request.Translation is None and relative_space_id is not None:
                 move_request.Translation = status.Position
                 move_request.Translation.PanTilt.space = ptz_config["Spaces"][
                     "RelativePanTiltTranslationSpace"
-                ][fov_space_id]["URI"]
+                ][relative_space_id]["URI"]
 
             # try setting relative zoom translation space
             try:
@@ -436,13 +459,14 @@ class OnvifController:
 
         if (
             self.config.cameras[camera_name].onvif.autotracking.enabled_in_config
-            and self.config.cameras[camera_name].onvif.autotracking.enabled
-            and fov_space_id is not None
+            and relative_space_id is not None
             and configs.DefaultRelativePanTiltTranslationSpace is not None
         ):
-            supported_features.append("pt-r-fov")
+            supported_features.append(
+                "pt-r-generic" if use_generic_relative else "pt-r-fov"
+            )
             self.cams[camera_name]["relative_fov_range"] = (
-                ptz_config.Spaces.RelativePanTiltTranslationSpace[fov_space_id]
+                ptz_config.Spaces.RelativePanTiltTranslationSpace[relative_space_id]
             )
 
         self.cams[camera_name]["features"] = supported_features
@@ -523,8 +547,15 @@ class OnvifController:
         )
         if missing:
             raise ValueError(f"unknown patrol presets: {', '.join(missing)}")
+        autotracking = self.config.cameras[camera_name].onvif.autotracking
+        if patrol.object_tracking and not autotracking.enabled_in_config:
+            raise ValueError(
+                "object tracking must be configured under this camera's ONVIF settings"
+            )
         await self._stop_patrol(camera_name)
         self.config.cameras[camera_name].onvif.patrol = patrol
+        autotracking.enabled = patrol.object_tracking
+        self.ptz_metrics[camera_name].autotracker_enabled.value = patrol.object_tracking
         if patrol.enabled:
             await self._start_patrol(camera_name)
         return self._camera_info(camera_name)
@@ -539,7 +570,14 @@ class OnvifController:
         ):
             return
         state = self.patrol_state[camera_name]
-        state.update({"running": True, "current_preset": None, "last_error": None})
+        state.update(
+            {
+                "running": True,
+                "paused_for_tracking": False,
+                "current_preset": None,
+                "last_error": None,
+            }
+        )
         self.patrol_tasks[camera_name] = self.loop.create_task(
             self._patrol_loop(camera_name)
         )
@@ -549,7 +587,9 @@ class OnvifController:
         await self._start_patrol(camera_name)
         return self._camera_info(camera_name)
 
-    async def _stop_patrol(self, camera_name: str) -> None:
+    async def _stop_patrol(
+        self, camera_name: str, *, paused_for_tracking: bool = False
+    ) -> None:
         task = self.patrol_tasks.pop(camera_name, None)
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
@@ -557,7 +597,25 @@ class OnvifController:
                 await task
         if camera_name in self.patrol_state:
             self.patrol_state[camera_name]["running"] = False
+            self.patrol_state[camera_name]["paused_for_tracking"] = paused_for_tracking
             self.patrol_state[camera_name]["current_preset"] = None
+
+    async def pause_patrol_for_tracking(self, camera_name: str) -> None:
+        """Pause a running patrol without losing the intent to resume it."""
+        state = self.patrol_state.get(camera_name)
+        if state is None or not state["running"]:
+            return
+        logger.info(f"Pausing PTZ patrol for object tracking on {camera_name}")
+        await self._stop_patrol(camera_name, paused_for_tracking=True)
+
+    async def resume_patrol_after_tracking(self, camera_name: str) -> bool:
+        """Resume only a patrol that object tracking previously paused."""
+        state = self.patrol_state.get(camera_name)
+        if state is None or not state["paused_for_tracking"]:
+            return False
+        logger.info(f"Resuming PTZ patrol after object tracking on {camera_name}")
+        await self._start_patrol(camera_name)
+        return True
 
     async def stop_patrol(self, camera_name: str) -> dict[str, Any]:
         await self._stop_patrol(camera_name)
@@ -614,8 +672,10 @@ class OnvifController:
             "presets": list(self.cams[camera_name]["presets"].keys()),
             "patrol": {
                 "enabled": patrol.enabled,
+                "object_tracking": patrol.object_tracking,
                 "steps": [step.model_dump() for step in patrol.steps],
                 "running": state.get("running", False),
+                "paused_for_tracking": state.get("paused_for_tracking", False),
                 "current_preset": state.get("current_preset"),
                 "last_error": state.get("last_error"),
             },
@@ -684,8 +744,10 @@ class OnvifController:
             logger.warning(f"Onvif sending move request to {camera_name} failed: {e}")
 
     async def _move_relative(self, camera_name: str, pan, tilt, zoom, speed) -> None:
-        if "pt-r-fov" not in self.cams[camera_name]["features"]:
-            logger.error(f"{camera_name} does not support ONVIF RelativeMove (FOV).")
+        if not ({"pt-r-fov", "pt-r-generic"} & set(self.cams[camera_name]["features"])):
+            logger.error(
+                f"{camera_name} does not support a compatible ONVIF RelativeMove."
+            )
             return
 
         logger.debug(
@@ -708,6 +770,13 @@ class OnvifController:
         ].frame_time.value
         self.ptz_metrics[camera_name].stop_time.value = 0
         move_request = self.cams[camera_name]["relative_move_request"]
+
+        if self.cams[camera_name].get("generic_relative", False):
+            scale = self.config.cameras[
+                camera_name
+            ].onvif.autotracking.generic_relative_scale
+            pan *= scale
+            tilt *= scale
 
         # function takes in -1 to 1 for pan and tilt, interpolate to the values of the camera.
         # The onvif spec says this can report as +INF and -INF, so this may need to be modified
@@ -766,6 +835,19 @@ class OnvifController:
             move_request.Translation.Zoom.x = 0
 
         self.cams[camera_name]["active"] = False
+
+        if self.cams[camera_name].get("generic_relative", False):
+            duration = (
+                max(abs(pan), abs(tilt))
+                * self.config.cameras[
+                    camera_name
+                ].onvif.autotracking.generic_move_seconds
+            )
+            await asyncio.sleep(max(0.1, duration))
+            self.ptz_metrics[camera_name].stop_time.value = self.ptz_metrics[
+                camera_name
+            ].frame_time.value
+            self.ptz_metrics[camera_name].motor_stopped.set()
 
     async def _move_to_preset(self, camera_name: str, preset: str) -> None:
         if isinstance(preset, bytes):

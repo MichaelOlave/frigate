@@ -25,10 +25,15 @@ An administrator can open a camera's PTZ controls and select the route button to
 - set a dwell time from 1 to 3600 seconds for each route step;
 - start or stop the saved route; and
 - choose whether the route starts automatically with Frigate.
+- optionally pause the route to follow a detected object, then resume after the target is
+  out of view for the configured autotracking timeout.
 
 Manual PTZ movement pauses a running patrol. Runtime start and stop do not change whether
 the patrol is enabled at startup. A running patrol retries its ONVIF connection every five
 seconds after a camera disconnect and resumes from the first route step once reconnected.
+Object following uses Frigate's object detector rather than raw pixel motion. Cameras that
+only advertise ONVIF `TranslationGenericSpace` can opt into a conservative scaled-move
+fallback with `onvif.autotracking.generic_relative`; it is disabled by default.
 
 The UI persists the following schema in `/config/ptz_patrol.yml`:
 
@@ -36,6 +41,7 @@ The UI persists the following schema in `/config/ptz_patrol.yml`:
 cameras:
   camera_name:
     enabled: true
+    object_tracking: true
     steps:
       - preset: left-window
         dwell: 10

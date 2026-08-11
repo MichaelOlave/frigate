@@ -48,6 +48,22 @@ class PtzAutotrackConfig(FrigateBaseModel):
     timeout: int = Field(
         default=10, title="Seconds to delay before returning to preset."
     )
+    generic_relative: bool = Field(
+        default=False,
+        title="Allow experimental autotracking with generic ONVIF relative moves.",
+    )
+    generic_relative_scale: float = Field(
+        default=0.15,
+        ge=0.01,
+        le=1.0,
+        title="Scale applied to generic ONVIF relative pan and tilt moves.",
+    )
+    generic_move_seconds: float = Field(
+        default=4.0,
+        ge=0.1,
+        le=5.0,
+        title="Estimated duration of a full-scale generic relative move.",
+    )
     movement_weights: Optional[Union[str, list[str]]] = Field(
         default_factory=list,
         title="Internal value used for PTZ movements based on the speed of your camera's motor.",
@@ -89,6 +105,10 @@ class PtzPatrolStepConfig(FrigateBaseModel):
 
 class PtzPatrolConfig(FrigateBaseModel):
     enabled: bool = Field(default=False, title="Start the PTZ patrol automatically.")
+    object_tracking: bool = Field(
+        default=False,
+        title="Pause this patrol while Frigate follows a detected object.",
+    )
     steps: list[PtzPatrolStepConfig] = Field(
         default_factory=list,
         max_length=64,

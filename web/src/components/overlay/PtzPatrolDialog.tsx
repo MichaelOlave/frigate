@@ -36,12 +36,16 @@ export default function PtzPatrolDialog({ camera, ptz, refresh }: Props) {
   const [presetName, setPresetName] = useState("");
   const [selectedPreset, setSelectedPreset] = useState("");
   const [enabled, setEnabled] = useState(ptz.patrol.enabled);
+  const [objectTracking, setObjectTracking] = useState(
+    ptz.patrol.object_tracking,
+  );
   const [steps, setSteps] = useState<PtzPatrolStep[]>(ptz.patrol.steps);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setEnabled(ptz.patrol.enabled);
+    setObjectTracking(ptz.patrol.object_tracking);
     setSteps(ptz.patrol.steps);
     setSelectedPreset(ptz.presets[0] ?? "");
   }, [open, ptz]);
@@ -97,7 +101,11 @@ export default function PtzPatrolDialog({ camera, ptz, refresh }: Props) {
   const savePatrol = async () => {
     setSaving(true);
     try {
-      await axios.put(`${camera}/ptz/patrol`, { enabled, steps });
+      await axios.put(`${camera}/ptz/patrol`, {
+        enabled,
+        object_tracking: objectTracking,
+        steps,
+      });
       await refresh();
       toast.success("Patrol path saved.");
       setOpen(false);
@@ -195,6 +203,23 @@ export default function PtzPatrolDialog({ camera, ptz, refresh }: Props) {
             />
           </div>
 
+          <div className="flex items-center justify-between">
+            <div>
+              <Label htmlFor={`${camera}-patrol-object-tracking`}>
+                Follow detected objects
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                Pause patrol to follow a target, then resume after it leaves
+                view.
+              </p>
+            </div>
+            <Switch
+              id={`${camera}-patrol-object-tracking`}
+              checked={objectTracking}
+              onCheckedChange={setObjectTracking}
+            />
+          </div>
+
           <div className="flex gap-2">
             <Select value={selectedPreset} onValueChange={setSelectedPreset}>
               <SelectTrigger>
@@ -281,7 +306,7 @@ export default function PtzPatrolDialog({ camera, ptz, refresh }: Props) {
 
         <DialogFooter className="gap-2 sm:justify-between">
           <div className="flex gap-2">
-            {ptz.patrol.running ? (
+            {ptz.patrol.running || ptz.patrol.paused_for_tracking ? (
               <Button
                 variant="secondary"
                 onClick={() => void setRunning(false)}

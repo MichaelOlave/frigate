@@ -271,7 +271,9 @@ class PtzAutoTracker:
                 self.ptz_metrics[camera].autotracker_enabled.value = False
                 return
 
-            if "pt-r-fov" not in self.onvif.cams[camera]["features"]:
+            if not (
+                {"pt-r-fov", "pt-r-generic"} & set(self.onvif.cams[camera]["features"])
+            ):
                 logger.warning(
                     f"Disabling autotracking for {camera}: FOV relative movement not supported"
                 )
@@ -279,7 +281,10 @@ class PtzAutoTracker:
                 self.ptz_metrics[camera].autotracker_enabled.value = False
                 return
 
-            move_status_supported = await self.onvif.get_service_capabilities(camera)
+            generic_relative = self.onvif.cams[camera].get("generic_relative", False)
+            move_status_supported = (
+                generic_relative or await self.onvif.get_service_capabilities(camera)
+            )
 
             if not (
                 isinstance(move_status_supported, bool) and move_status_supported
@@ -295,7 +300,8 @@ class PtzAutoTracker:
                 return
 
         if self.onvif.cams[camera]["init"]:
-            await self.onvif.get_camera_status(camera)
+            if not self.onvif.cams[camera].get("generic_relative", False):
+                await self.onvif.get_camera_status(camera)
 
             # movement queue with asyncio on OnvifController loop
             asyncio.run_coroutine_threadsafe(
@@ -1360,6 +1366,10 @@ class PtzAutoTracker:
                     f"{camera}: New object: {obj.obj_data['id']} {obj.obj_data['box']} {obj.obj_data['frame_time']}"
                 )
                 self.ptz_metrics[camera].tracking_active.set()
+                future = asyncio.run_coroutine_threadsafe(
+                    self.onvif.pause_patrol_for_tracking(camera), self.onvif.loop
+                )
+                future.result()
                 self.dispatcher.publish(
                     f"{camera}/ptz_autotracker/active", "ON", retain=False
                 )
@@ -1465,7 +1475,10 @@ class PtzAutoTracker:
         if not self.autotracker_init[camera]:
             self._autotracker_setup(self.config.cameras[camera], camera)
         # regularly update camera status
-        if not self.ptz_metrics[camera].motor_stopped.is_set():
+        if (
+            not self.onvif.cams[camera].get("generic_relative", False)
+            and not self.ptz_metrics[camera].motor_stopped.is_set()
+        ):
             await self.onvif.get_camera_status(camera)
 
         # return to preset if tracking is over
@@ -1478,7 +1491,6 @@ class PtzAutoTracker:
                 - self.tracked_object_history[camera][-1]["frame_time"]
                 >= autotracker_config.timeout
             )
-            and autotracker_config.return_preset
         ):
             # clear tracked object and reset zoom level
             self.tracked_object[camera] = None
@@ -1489,10 +1501,12 @@ class PtzAutoTracker:
             logger.debug(
                 f"{camera}: Time is {self.ptz_metrics[camera].frame_time.value}, returning to preset: {autotracker_config.return_preset}"
             )
-            await self.onvif._move_to_preset(
-                camera,
-                autotracker_config.return_preset.lower(),
-            )
+            resumed_patrol = await self.onvif.resume_patrol_after_tracking(camera)
+            if not resumed_patrol and autotracker_config.return_preset:
+                await self.onvif._move_to_preset(
+                    camera,
+                    autotracker_config.return_preset.lower(),
+                )
 
             # update stored zoom level from preset
             while not self.ptz_metrics[camera].motor_stopped.is_set():
