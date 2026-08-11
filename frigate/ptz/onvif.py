@@ -607,6 +607,11 @@ class OnvifController:
             return
         logger.info(f"Pausing PTZ patrol for object tracking on {camera_name}")
         await self._stop_patrol(camera_name, paused_for_tracking=True)
+        # Cancelling the patrol task only prevents the next patrol step. A GotoPreset
+        # request that the camera already accepted can continue moving the motor after
+        # the coroutine is cancelled. Stop that physical movement before autotracking
+        # is allowed to issue its first RelativeMove.
+        await self._stop(camera_name)
 
     async def resume_patrol_after_tracking(self, camera_name: str) -> bool:
         """Resume only a patrol that object tracking previously paused."""
@@ -865,14 +870,17 @@ class OnvifController:
         move_request = self.cams[camera_name]["move_request"]
         preset_token = self.cams[camera_name]["presets"][preset]
 
-        await self.cams[camera_name]["ptz"].GotoPreset(
-            {
-                "ProfileToken": move_request.ProfileToken,
-                "PresetToken": preset_token,
-            }
-        )
-
-        self.cams[camera_name]["active"] = False
+        try:
+            await self.cams[camera_name]["ptz"].GotoPreset(
+                {
+                    "ProfileToken": move_request.ProfileToken,
+                    "PresetToken": preset_token,
+                }
+            )
+        finally:
+            # Keep the software action state consistent when a patrol is cancelled
+            # while the ONVIF request is in flight.
+            self.cams[camera_name]["active"] = False
 
     async def _zoom(self, camera_name: str, command: OnvifCommandEnum) -> None:
         if self.cams[camera_name]["active"]:

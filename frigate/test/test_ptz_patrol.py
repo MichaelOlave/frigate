@@ -85,9 +85,14 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
             }
         )
         self.controller.ptz_metrics = {
-            "front": SimpleNamespace(autotracker_enabled=SimpleNamespace(value=False))
+            "front": SimpleNamespace(
+                autotracker_enabled=SimpleNamespace(value=False),
+                start_time=SimpleNamespace(value=0),
+                stop_time=SimpleNamespace(value=0),
+            )
         }
         self.controller._ensure_initialized = AsyncMock()
+        self.controller._stop = AsyncMock()
 
     async def test_configure_rejects_unknown_presets(self):
         config = patrol_config(
@@ -133,6 +138,16 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
         self.controller._move_to_preset.assert_awaited_once_with("front", "door")
         self.assertFalse(self.controller.patrol_state["front"]["running"])
 
+    async def test_cancelled_preset_move_clears_active_state(self):
+        self.controller.cams["front"]["ptz"].GotoPreset = AsyncMock(
+            side_effect=asyncio.CancelledError
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.controller._move_to_preset("front", "door")
+
+        self.assertFalse(self.controller.cams["front"]["active"])
+
     async def test_tracking_pause_resumes_running_patrol(self):
         self.controller.config.cameras["front"].onvif.patrol = patrol_config(
             enabled=True,
@@ -149,6 +164,7 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
 
         self.assertFalse(self.controller.patrol_state["front"]["running"])
         self.assertTrue(self.controller.patrol_state["front"]["paused_for_tracking"])
+        self.controller._stop.assert_awaited_once_with("front")
 
         resumed = await self.controller.resume_patrol_after_tracking("front")
         await asyncio.sleep(0)
