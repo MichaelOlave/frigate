@@ -27,7 +27,8 @@ An administrator can open a camera's PTZ controls and select the route button to
 - choose whether the route starts automatically with Frigate.
 
 Manual PTZ movement pauses a running patrol. Runtime start and stop do not change whether
-the patrol is enabled at startup.
+the patrol is enabled at startup. A running patrol retries its ONVIF connection every five
+seconds after a camera disconnect and resumes from the first route step once reconnected.
 
 The UI persists the following schema in `/config/ptz_patrol.yml`:
 

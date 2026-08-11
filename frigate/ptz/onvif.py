@@ -49,6 +49,7 @@ class OnvifController:
         self.failed_cams: dict[str, dict] = {}
         self.max_retries = 5
         self.reset_timeout = 900  # 15 minutes
+        self.patrol_retry_interval = 5
         self.config = config
         self.ptz_metrics = ptz_metrics
 
@@ -565,10 +566,20 @@ class OnvifController:
     async def _patrol_loop(self, camera_name: str) -> None:
         try:
             while True:
-                for step in self.config.cameras[camera_name].onvif.patrol.steps:
-                    self.patrol_state[camera_name]["current_preset"] = step.preset
-                    await self._move_to_preset(camera_name, step.preset)
-                    await asyncio.sleep(step.dwell)
+                try:
+                    for step in self.config.cameras[camera_name].onvif.patrol.steps:
+                        self.patrol_state[camera_name]["current_preset"] = step.preset
+                        await self._move_to_preset(camera_name, step.preset)
+                        await asyncio.sleep(step.dwell)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"PTZ patrol connection lost for {camera_name}: {e}; retrying"
+                    )
+                    self.patrol_state[camera_name]["current_preset"] = None
+                    self.patrol_state[camera_name]["last_error"] = str(e)
+                    await self._restore_patrol_connection(camera_name)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -577,6 +588,22 @@ class OnvifController:
         finally:
             self.patrol_state[camera_name]["running"] = False
             self.patrol_state[camera_name]["current_preset"] = None
+
+    async def _restore_patrol_connection(self, camera_name: str) -> None:
+        """Retry ONVIF initialization until the patrol reconnects or is stopped."""
+        while True:
+            await asyncio.sleep(self.patrol_retry_interval)
+            self.cams[camera_name]["init"] = False
+            try:
+                if await self._init_onvif(camera_name):
+                    self.patrol_state[camera_name]["last_error"] = None
+                    logger.info(f"PTZ patrol reconnected for {camera_name}; resuming")
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.patrol_state[camera_name]["last_error"] = str(e)
+                logger.warning(f"PTZ patrol reconnect failed for {camera_name}: {e}")
 
     def _camera_info(self, camera_name: str) -> dict[str, Any]:
         patrol = self.config.cameras[camera_name].onvif.patrol

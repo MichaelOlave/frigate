@@ -51,6 +51,7 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.controller = OnvifController.__new__(OnvifController)
         self.controller.loop = asyncio.get_running_loop()
+        self.controller.patrol_retry_interval = 0
         self.controller.patrol_tasks = {}
         self.controller.patrol_state = {
             "front": {
@@ -126,3 +127,32 @@ class TestOnvifPatrolController(IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "configured patrol"):
             await self.controller.remove_preset("front", "door")
+
+    async def test_patrol_reconnects_and_resumes_after_move_failure(self):
+        self.controller.config.cameras["front"].onvif.patrol = patrol_config(
+            enabled=True,
+            steps=[
+                PtzPatrolStepConfig(preset="door", dwell=1),
+                PtzPatrolStepConfig(preset="driveway", dwell=1),
+            ],
+        )
+        self.controller._move_to_preset = AsyncMock(
+            side_effect=[ConnectionError("camera offline"), None]
+        )
+        self.controller._restore_patrol_connection = AsyncMock()
+
+        await self.controller._start_patrol("front")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await self.controller._stop_patrol("front")
+
+        self.controller._restore_patrol_connection.assert_awaited_once_with("front")
+        self.assertEqual(self.controller._move_to_preset.await_count, 2)
+
+    async def test_restore_patrol_connection_retries_until_initialized(self):
+        self.controller._init_onvif = AsyncMock(side_effect=[False, True])
+
+        await self.controller._restore_patrol_connection("front")
+
+        self.assertEqual(self.controller._init_onvif.await_count, 2)
+        self.assertIsNone(self.controller.patrol_state["front"]["last_error"])
