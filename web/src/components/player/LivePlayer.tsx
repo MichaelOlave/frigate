@@ -43,6 +43,7 @@ type LivePlayerProps = {
   volume?: number;
   playInBackground: boolean;
   micEnabled?: boolean; // only webrtc supports mic
+  microphoneGain?: number;
   iOSCompatFullScreen?: boolean;
   pip?: boolean;
   autoLive?: boolean;
@@ -68,6 +69,7 @@ export default function LivePlayer({
   volume,
   playInBackground = false,
   micEnabled = false,
+  microphoneGain = 1,
   iOSCompatFullScreen = false,
   pip,
   autoLive = true,
@@ -253,6 +255,7 @@ export default function LivePlayer({
         audioEnabled={playAudio}
         volume={volume}
         microphoneEnabled={micEnabled}
+        microphoneGain={microphoneGain}
         iOSCompatFullScreen={iOSCompatFullScreen}
         onPlaying={playerIsPlaying}
         pip={pip}

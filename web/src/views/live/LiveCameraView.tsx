@@ -74,6 +74,7 @@ import {
   LuPictureInPicture,
   LuPower,
   LuPowerOff,
+  LuSlidersHorizontal,
   LuVideo,
   LuVideoOff,
   LuX,
@@ -122,6 +123,7 @@ import {
   SnapshotResult,
 } from "@/utils/snapshotUtil";
 import ActivityIndicator from "@/components/indicators/activity-indicator";
+import { VolumeSlider } from "@/components/ui/slider";
 
 type LiveCameraViewProps = {
   config?: FrigateConfig;
@@ -264,6 +266,14 @@ export default function LiveCameraView({
 
   const [audio, setAudio] = useSessionPersistence("liveAudio", false);
   const [mic, setMic] = useState(false);
+  const [cameraVolume, setCameraVolume] = useUserPersistence<number>(
+    `${camera.name}-camera-volume`,
+    1,
+  );
+  const [microphoneGain, setMicrophoneGain] = useUserPersistence<number>(
+    `${camera.name}-microphone-gain`,
+    1,
+  );
   const [webRTC, setWebRTC] = useState(false);
   const [pip, setPip] = useState(false);
   const [lowBandwidth, setLowBandwidth] = useState(false);
@@ -593,6 +603,79 @@ export default function LiveCameraView({
                 disabled={!cameraEnabled || debug}
               />
             )}
+            {(supportsAudioOutput || supports2WayTalk) &&
+              preferredLiveMode != "jsmpeg" && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      className={cn(
+                        "flex items-center justify-center p-2 md:p-0",
+                        fullscreen
+                          ? "rounded-full bg-gradient-to-br from-gray-400 to-gray-500 text-primary"
+                          : "rounded-lg bg-secondary text-secondary-foreground",
+                      )}
+                      variant="ghost"
+                      size="sm"
+                      aria-label={t("volumeControls.title")}
+                      disabled={!cameraEnabled || debug}
+                    >
+                      <LuSlidersHorizontal className="size-5 md:m-[6px]" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-72">
+                    <div className="flex flex-col gap-5">
+                      <div className="font-medium">
+                        {t("volumeControls.title")}
+                      </div>
+                      {supportsAudioOutput && (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center justify-between text-sm">
+                            <Label htmlFor="camera-volume">
+                              {t("volumeControls.cameraAudio")}
+                            </Label>
+                            <span>
+                              {Math.round((cameraVolume ?? 1) * 100)}%
+                            </span>
+                          </div>
+                          <VolumeSlider
+                            id="camera-volume"
+                            value={[cameraVolume ?? 1]}
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            onValueChange={(value) => setCameraVolume(value[0])}
+                          />
+                        </div>
+                      )}
+                      {supports2WayTalk && (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center justify-between text-sm">
+                            <Label htmlFor="microphone-gain">
+                              {t("volumeControls.talkBack")}
+                            </Label>
+                            <span>
+                              {Math.round((microphoneGain ?? 1) * 100)}%
+                            </span>
+                          </div>
+                          <VolumeSlider
+                            id="microphone-gain"
+                            value={[microphoneGain ?? 1]}
+                            min={0}
+                            max={2}
+                            step={0.05}
+                            onValueChange={(value) =>
+                              setMicrophoneGain(value[0])
+                            }
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            {t("volumeControls.talkBackHint")}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )}
             <FrigateCameraFeatures
               camera={camera}
               recordingEnabled={camera.record.enabled_in_config}
@@ -649,9 +732,11 @@ export default function LiveCameraView({
                   alwaysShowCameraName={false}
                   cameraConfig={camera}
                   playAudio={audio}
+                  volume={cameraVolume ?? 1}
                   playInBackground={playInBackground ?? false}
                   showStats={showStats}
                   micEnabled={mic}
+                  microphoneGain={microphoneGain ?? 1}
                   iOSCompatFullScreen={isIOS}
                   preferredLiveMode={preferredLiveMode}
                   useWebGL={true}

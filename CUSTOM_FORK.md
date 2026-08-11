@@ -3,6 +3,11 @@
 This fork adds configurable ONVIF preset patrols to Frigate's native PTZ controls. It is
 maintained for the two Tapo TCB72 cameras documented in the `LiveNetwork` repository.
 
+It also adds per-user, per-camera live audio controls for browser playback volume and
+WebRTC talk-back microphone gain. Playback ranges from 0–100%; talk-back ranges from
+0–200% so quiet microphones can be amplified. These controls affect only the live browser
+session and do not change camera firmware gain or recorded audio.
+
 ## Upstream boundary
 
 - Current base: upstream tag `v0.17.2`.

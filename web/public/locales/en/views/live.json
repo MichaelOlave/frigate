@@ -10,6 +10,12 @@
     "enable": "Enable Camera Audio",
     "disable": "Disable Camera Audio"
   },
+  "volumeControls": {
+    "title": "Audio volume",
+    "cameraAudio": "Camera to browser",
+    "talkBack": "Microphone to camera",
+    "talkBackHint": "Values above 100% amplify the microphone and may cause clipping."
+  },
   "ptz": {
     "move": {
       "clickMove": {

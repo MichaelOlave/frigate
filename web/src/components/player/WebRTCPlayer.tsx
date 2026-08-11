@@ -9,6 +9,7 @@ type WebRtcPlayerProps = {
   audioEnabled?: boolean;
   volume?: number;
   microphoneEnabled?: boolean;
+  microphoneGain?: number;
   iOSCompatFullScreen?: boolean; // ios doesn't support fullscreen divs so we must support the video element
   pip?: boolean;
   getStats?: boolean;
@@ -24,6 +25,7 @@ export default function WebRtcPlayer({
   audioEnabled = false,
   volume,
   microphoneEnabled = false,
+  microphoneGain = 1,
   iOSCompatFullScreen = false,
   pip = false,
   getStats = false,
@@ -53,6 +55,11 @@ export default function WebRtcPlayer({
 
   const pcRef = useRef<RTCPeerConnection | undefined>();
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const microphoneStreamRef = useRef<MediaStream>();
+  const processedMicrophoneStreamRef = useRef<MediaStream>();
+  const microphoneAudioContextRef = useRef<AudioContext>();
+  const microphoneGainNodeRef = useRef<GainNode>();
+  const microphoneGainRef = useRef(microphoneGain);
   const [bufferTimeout, setBufferTimeout] = useState<NodeJS.Timeout>();
   const videoLoadTimeoutRef = useRef<NodeJS.Timeout>();
 
@@ -116,6 +123,45 @@ export default function WebRtcPlayer({
         media === "user"
           ? await navigator.mediaDevices.getUserMedia(constraints)
           : await navigator.mediaDevices.getDisplayMedia(constraints);
+
+      if (media === "user" && constraints.audio) {
+        microphoneStreamRef.current = stream;
+
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          let audioContext: AudioContext | undefined;
+          try {
+            audioContext = new AudioContext();
+            if (audioContext.state === "suspended") {
+              await audioContext.resume();
+            }
+
+            const source = audioContext.createMediaStreamSource(
+              new MediaStream([audioTrack]),
+            );
+            const gainNode = audioContext.createGain();
+            const destination = audioContext.createMediaStreamDestination();
+
+            gainNode.gain.value = microphoneGainRef.current;
+            source.connect(gainNode).connect(destination);
+
+            microphoneAudioContextRef.current = audioContext;
+            microphoneGainNodeRef.current = gainNode;
+            processedMicrophoneStreamRef.current = destination.stream;
+
+            return [
+              ...stream.getVideoTracks(),
+              ...destination.stream.getAudioTracks(),
+            ];
+          } catch {
+            // Keep talk-back available at the browser's native level when Web Audio
+            // is unavailable or blocked. The gain slider becomes a no-op in that case.
+            void audioContext?.close();
+            return stream.getTracks();
+          }
+        }
+      }
+
       return stream.getTracks();
     } catch (e) {
       return [];
@@ -187,6 +233,16 @@ export default function WebRtcPlayer({
         pcRef.current.close();
         pcRef.current = undefined;
       }
+
+      microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+      microphoneStreamRef.current = undefined;
+      processedMicrophoneStreamRef.current
+        ?.getTracks()
+        .forEach((track) => track.stop());
+      processedMicrophoneStreamRef.current = undefined;
+      microphoneAudioContextRef.current?.close();
+      microphoneAudioContextRef.current = undefined;
+      microphoneGainNodeRef.current = undefined;
     };
   }, [
     camera,
@@ -221,6 +277,14 @@ export default function WebRtcPlayer({
 
     videoRef.current.volume = volume;
   }, [volume, videoRef]);
+
+  useEffect(() => {
+    microphoneGainRef.current = microphoneGain;
+
+    if (microphoneGainNodeRef.current) {
+      microphoneGainNodeRef.current.gain.value = microphoneGain;
+    }
+  }, [microphoneGain]);
 
   useEffect(() => {
     videoLoadTimeoutRef.current = setTimeout(() => {
